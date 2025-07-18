@@ -56,7 +56,7 @@ func main() {
     ctx := stx.New(context.Background(), db)
     
     // Use the context to get database connection
-    db = stx.GetCurrent(ctx)
+    db = stx.Current(ctx)
     
     // Auto-migrate
     db.AutoMigrate(&User{})
@@ -72,7 +72,7 @@ func main() {
 ```go
 // Automatic transaction management
 err := stx.WithTransaction(ctx, func(txCtx context.Context) error {
-    txDB := stx.GetCurrent(txCtx)
+    txDB := stx.Current(txCtx)
     
     // All operations within this function are in a transaction
     user := User{Name: "Jane Doe"}
@@ -90,7 +90,7 @@ err := stx.WithTransaction(ctx, func(txCtx context.Context) error {
 ```go
 // Begin transaction
 txCtx := stx.Begin(ctx)
-txDB := stx.GetCurrent(txCtx)
+txDB := stx.Current(txCtx)
 
 // Perform operations
 user := User{Name: "Bob Smith"}
@@ -105,10 +105,31 @@ if err := stx.Commit(txCtx); err != nil {
 }
 ```
 
+### Defer Block Pattern
+
+```go
+// Elegant defer pattern with automatic panic recovery and transaction handling
+func demo(ctx context.Context) (err error) {
+    txCtx, cleanup := stx.WithDefer(ctx)
+    defer cleanup(&err)
+    
+    db := stx.Current(txCtx)
+    
+    // Create user
+    user := User{Name: "Alice"}
+    if err := db.Create(&user).Error; err != nil {
+        return err // Transaction will be rolled back
+    }
+    
+    // Transaction will be committed automatically if no error
+    return nil
+}
+```
+
 ### Check Transaction Status
 
 ```go
-if stx.IsTransaction(ctx) {
+if stx.IsTx(ctx) {
     log.Println("Currently in a transaction")
 } else {
     log.Println("Not in a transaction")
@@ -123,7 +144,7 @@ if stx.IsTransaction(ctx) {
 
 Creates a new context with the given GORM database instance.
 
-#### `GetCurrent(ctx context.Context) *gorm.DB`
+#### `Current(ctx context.Context) *gorm.DB`
 
 Retrieves the current GORM database instance from the context. Returns nil if no database is found.
 
@@ -143,7 +164,11 @@ Commits the current transaction. Returns `nil` if no transaction is active (oper
 
 Rolls back the current transaction. Returns `nil` if no transaction is active (operations were performed directly without transactions).
 
-#### `IsTransaction(ctx context.Context) bool`
+#### `WithDefer(ctx context.Context, opts ...*sql.TxOptions) (context.Context, func(*error))`
+
+Begins a transaction and returns a context and cleanup function. The cleanup function should be called with defer and handles panic recovery and automatic commit/rollback based on the error state.
+
+#### `IsTx(ctx context.Context) bool`
 
 Returns true if the current context contains an active transaction.
 

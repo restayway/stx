@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
@@ -45,12 +46,16 @@ func main() {
 	fmt.Println("\n=== Nested Transactions ===")
 	nestedTransactionExample(ctx)
 
+	// Example 5: Defer pattern
+	fmt.Println("\n=== Defer Pattern ===")
+	deferPatternExample(ctx)
+
 	fmt.Println("\n=== Done ===")
 }
 
 func basicUsage(ctx context.Context) {
 	// Get database from context
-	db := stx.GetCurrent(ctx)
+	db := stx.Current(ctx)
 
 	// Create a user
 	user := User{Name: "John Doe", Age: 30}
@@ -66,7 +71,7 @@ func basicUsage(ctx context.Context) {
 func transactionExample(ctx context.Context) {
 	// Use automatic transaction management
 	err := stx.WithTransaction(ctx, func(txCtx context.Context) error {
-		txDB := stx.GetCurrent(txCtx)
+		txDB := stx.Current(txCtx)
 
 		// Create multiple users in a transaction
 		users := []User{
@@ -94,10 +99,10 @@ func transactionExample(ctx context.Context) {
 func manualTransactionExample(ctx context.Context) {
 	// Begin transaction manually
 	txCtx := stx.Begin(ctx)
-	txDB := stx.GetCurrent(txCtx)
+	txDB := stx.Current(txCtx)
 
 	// Check if we're in a transaction
-	if stx.IsTransaction(txCtx) {
+	if stx.IsTx(txCtx) {
 		fmt.Println("Successfully started transaction")
 	}
 
@@ -129,7 +134,7 @@ func manualTransactionExample(ctx context.Context) {
 
 func nestedTransactionExample(ctx context.Context) {
 	err := stx.WithTransaction(ctx, func(outerCtx context.Context) error {
-		outerDB := stx.GetCurrent(outerCtx)
+		outerDB := stx.Current(outerCtx)
 
 		// Create user in outer transaction
 		user1 := User{Name: "David", Age: 40}
@@ -140,7 +145,7 @@ func nestedTransactionExample(ctx context.Context) {
 
 		// Nested transaction
 		return stx.WithTransaction(outerCtx, func(innerCtx context.Context) error {
-			innerDB := stx.GetCurrent(innerCtx)
+			innerDB := stx.Current(innerCtx)
 
 			// Create user in inner transaction
 			user2 := User{Name: "Eve", Age: 22}
@@ -158,4 +163,77 @@ func nestedTransactionExample(ctx context.Context) {
 	} else {
 		fmt.Println("Nested transaction completed successfully")
 	}
+}
+
+func deferPatternExample(ctx context.Context) {
+	// Example 1: Successful defer pattern
+	fmt.Println("=== Successful Defer Pattern ===")
+	err := deferSuccess(ctx)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+	} else {
+		fmt.Println("Defer pattern completed successfully")
+	}
+
+	// Example 2: Error handling with defer
+	fmt.Println("\n=== Error Handling with Defer ===")
+	err = deferError(ctx)
+	if err != nil {
+		fmt.Printf("Expected error: %v\n", err)
+	}
+
+	// Example 3: Panic recovery with defer
+	fmt.Println("\n=== Panic Recovery with Defer ===")
+	err = deferPanic(ctx)
+	if err != nil {
+		fmt.Printf("Recovered from panic: %v\n", err)
+	}
+}
+
+func deferSuccess(ctx context.Context) (err error) {
+	txCtx, cleanup := stx.WithDefer(ctx)
+	defer cleanup(&err)
+
+	db := stx.Current(txCtx)
+	
+	// Create a user
+	user := User{Name: "Defer Success", Age: 30}
+	if err := db.Create(&user).Error; err != nil {
+		return err
+	}
+	
+	fmt.Printf("Created user with defer: %+v\n", user)
+	return nil // Transaction will be committed automatically
+}
+
+func deferError(ctx context.Context) (err error) {
+	txCtx, cleanup := stx.WithDefer(ctx)
+	defer cleanup(&err)
+
+	db := stx.Current(txCtx)
+	
+	// Create a user
+	user := User{Name: "Defer Error", Age: 25}
+	if err := db.Create(&user).Error; err != nil {
+		return err
+	}
+	
+	fmt.Printf("Created user but will rollback: %+v\n", user)
+	return errors.New("simulated error") // This will trigger rollback
+}
+
+func deferPanic(ctx context.Context) (err error) {
+	txCtx, cleanup := stx.WithDefer(ctx)
+	defer cleanup(&err)
+
+	db := stx.Current(txCtx)
+	
+	// Create a user
+	user := User{Name: "Defer Panic", Age: 35}
+	if err := db.Create(&user).Error; err != nil {
+		return err
+	}
+	
+	fmt.Printf("Created user but will panic: %+v\n", user)
+	panic("simulated panic") // This will be recovered and trigger rollback
 }
