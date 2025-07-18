@@ -14,8 +14,9 @@ type contextKey string
 const txContextKey contextKey = "stx:tx"
 
 type STX struct {
-	mu sync.RWMutex
-	db *gorm.DB
+	mu        sync.RWMutex
+	db        *gorm.DB
+	callbacks []func()
 }
 
 // STXError represents an error with additional context
@@ -88,8 +89,67 @@ func WithTransaction(ctx context.Context, fn func(context.Context) error, opts .
 
 	return db.Transaction(func(tx *gorm.DB) error {
 		newCtx := context.WithValue(ctx, txContextKey, &STX{db: tx})
-		return fn(newCtx)
+		err := fn(newCtx)
+		
+		// Execute success callbacks if no error occurred
+		if err == nil {
+			if val := newCtx.Value(txContextKey); val != nil {
+				if stx, ok := val.(*STX); ok && stx != nil {
+					stx.mu.RLock()
+					callbacks := make([]func(), len(stx.callbacks))
+					copy(callbacks, stx.callbacks)
+					stx.mu.RUnlock()
+					
+					for _, callback := range callbacks {
+						if callback != nil {
+							callback()
+						}
+					}
+				}
+			}
+		}
+		
+		return err
 	}, opts...)
+}
+
+// OnSuccess registers a callback to execute when the transaction successfully commits.
+// If the context does not contain a transaction, the callback executes immediately.
+// This is useful for triggering events, notifications, or other side effects after
+// successful database operations.
+//
+// Example usage:
+//   stx.OnSuccess(ctx, func() {
+//       fmt.Println("Transaction completed successfully!")
+//   })
+//
+// For event streaming:
+//   stx.OnSuccess(ctx, func() {
+//       eventStream.Emit("user_created", userID)
+//   })
+func OnSuccess(ctx context.Context, callback func()) {
+	if ctx == nil || callback == nil {
+		return
+	}
+
+	val := ctx.Value(txContextKey)
+	if val == nil {
+		// No transaction context, execute immediately
+		callback()
+		return
+	}
+
+	stx, ok := val.(*STX)
+	if !ok || stx == nil {
+		// Invalid transaction context, execute immediately
+		callback()
+		return
+	}
+
+	// Add callback to be executed on successful commit
+	stx.mu.Lock()
+	stx.callbacks = append(stx.callbacks, callback)
+	stx.mu.Unlock()
 }
 
 func Begin(ctx context.Context, opts ...*sql.TxOptions) context.Context {
@@ -148,6 +208,24 @@ func IsTransaction(ctx context.Context) bool {
 // WithDefer begins a transaction and returns a context and cleanup function.
 // The cleanup function should be called with defer and handles panic recovery
 // and automatic commit/rollback based on the error state.
+//
+// Success callbacks registered with OnSuccess will be executed after a successful
+// commit, making this ideal for triggering events, notifications, or other side
+// effects that should only occur when the transaction is successfully persisted.
+//
+// Example usage:
+//   func createUser(ctx context.Context, user *User) (err error) {
+//       txCtx, cleanup := stx.WithDefer(ctx)
+//       defer cleanup(&err)
+//
+//       // Register success callback for event streaming
+//       stx.OnSuccess(txCtx, func() {
+//           eventStream.Emit("user_created", user.ID)
+//       })
+//
+//       // Perform database operations
+//       return stx.Current(txCtx).Create(user).Error
+//   }
 func WithDefer(ctx context.Context, opts ...*sql.TxOptions) (context.Context, func(*error)) {
 	txCtx := Begin(ctx, opts...)
 	
@@ -168,6 +246,25 @@ func WithDefer(ctx context.Context, opts ...*sql.TxOptions) (context.Context, fu
 		if commitErr := Commit(txCtx); commitErr != nil {
 			if err != nil {
 				*err = newSTXError("failed to commit transaction", commitErr)
+			}
+			return
+		}
+		
+		// Execute success callbacks after successful commit
+		if txCtx != nil {
+			if val := txCtx.Value(txContextKey); val != nil {
+				if stx, ok := val.(*STX); ok && stx != nil {
+					stx.mu.RLock()
+					callbacks := make([]func(), len(stx.callbacks))
+					copy(callbacks, stx.callbacks)
+					stx.mu.RUnlock()
+					
+					for _, callback := range callbacks {
+						if callback != nil {
+							callback()
+						}
+					}
+				}
 			}
 		}
 	}

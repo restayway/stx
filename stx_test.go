@@ -3,6 +3,7 @@ package stx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -506,6 +507,395 @@ func TestWithDefer(t *testing.T) {
 		txDB := Current(txCtx)
 		if txDB == nil {
 			t.Error("expected DB from defer transaction context")
+		}
+	})
+}
+
+func TestOnSuccess(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := New(context.Background(), db)
+
+	t.Run("basic OnSuccess with successful transaction", func(t *testing.T) {
+		var callbackExecuted bool
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Register success callback
+			OnSuccess(txCtx, func() {
+				callbackExecuted = true
+			})
+
+			// Create test model
+			model := TestModel{Name: "success-test"}
+			return Current(txCtx).Create(&model).Error
+		}()
+
+		if err != nil {
+			t.Fatalf("transaction failed: %v", err)
+		}
+
+		if !callbackExecuted {
+			t.Error("expected callback to be executed after successful transaction")
+		}
+	})
+
+	t.Run("OnSuccess with transaction rollback", func(t *testing.T) {
+		var callbackExecuted bool
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Register success callback
+			OnSuccess(txCtx, func() {
+				callbackExecuted = true
+			})
+
+			// Create test model
+			model := TestModel{Name: "rollback-test"}
+			if err := Current(txCtx).Create(&model).Error; err != nil {
+				return err
+			}
+
+			// Force rollback
+			return errors.New("forced rollback")
+		}()
+
+		if err == nil {
+			t.Fatal("expected error to trigger rollback")
+		}
+
+		if callbackExecuted {
+			t.Error("callback should not be executed after rollback")
+		}
+	})
+
+	t.Run("OnSuccess without transaction context", func(t *testing.T) {
+		var callbackExecuted bool
+		
+		// Call OnSuccess with plain context (no STX)
+		OnSuccess(context.Background(), func() {
+			callbackExecuted = true
+		})
+
+		if !callbackExecuted {
+			t.Error("expected callback to execute immediately without transaction context")
+		}
+	})
+
+	t.Run("OnSuccess with nil context", func(t *testing.T) {
+		var callbackExecuted bool
+		
+		// Should not panic
+		OnSuccess(nil, func() {
+			callbackExecuted = true
+		})
+
+		if callbackExecuted {
+			t.Error("callback should not execute with nil context")
+		}
+	})
+
+	t.Run("OnSuccess with nil callback", func(t *testing.T) {
+		// Should not panic
+		OnSuccess(ctx, nil)
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Should not panic
+			OnSuccess(txCtx, nil)
+			
+			model := TestModel{Name: "nil-callback-test"}
+			return Current(txCtx).Create(&model).Error
+		}()
+
+		if err != nil {
+			t.Fatalf("transaction with nil callback failed: %v", err)
+		}
+	})
+
+	t.Run("multiple OnSuccess callbacks", func(t *testing.T) {
+		var executionOrder []int
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Register multiple callbacks
+			OnSuccess(txCtx, func() {
+				executionOrder = append(executionOrder, 1)
+			})
+			OnSuccess(txCtx, func() {
+				executionOrder = append(executionOrder, 2)
+			})
+			OnSuccess(txCtx, func() {
+				executionOrder = append(executionOrder, 3)
+			})
+
+			model := TestModel{Name: "multiple-callbacks-test"}
+			return Current(txCtx).Create(&model).Error
+		}()
+
+		if err != nil {
+			t.Fatalf("transaction failed: %v", err)
+		}
+
+		expectedOrder := []int{1, 2, 3}
+		if len(executionOrder) != len(expectedOrder) {
+			t.Errorf("expected %d callbacks executed, got %d", len(expectedOrder), len(executionOrder))
+		}
+
+		for i, expected := range expectedOrder {
+			if i >= len(executionOrder) || executionOrder[i] != expected {
+				t.Errorf("expected callback order %v, got %v", expectedOrder, executionOrder)
+				break
+			}
+		}
+	})
+
+	t.Run("OnSuccess with panic recovery", func(t *testing.T) {
+		var callbackExecuted bool
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Register success callback
+			OnSuccess(txCtx, func() {
+				callbackExecuted = true
+			})
+
+			// Create test model
+			model := TestModel{Name: "panic-test"}
+			if err := Current(txCtx).Create(&model).Error; err != nil {
+				return err
+			}
+
+			// Force panic
+			panic("test panic")
+		}()
+
+		if err == nil {
+			t.Fatal("expected error from panic recovery")
+		}
+
+		if callbackExecuted {
+			t.Error("callback should not be executed after panic rollback")
+		}
+	})
+
+	t.Run("concurrent OnSuccess callback registration", func(t *testing.T) {
+		var wg sync.WaitGroup
+		var executionCount int
+		var mu sync.Mutex
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Register callbacks from multiple goroutines
+			const numCallbacks = 10
+			for i := 0; i < numCallbacks; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					OnSuccess(txCtx, func() {
+						mu.Lock()
+						executionCount++
+						mu.Unlock()
+					})
+				}()
+			}
+
+			wg.Wait()
+
+			model := TestModel{Name: "concurrent-callbacks-test"}
+			return Current(txCtx).Create(&model).Error
+		}()
+
+		if err != nil {
+			t.Fatalf("transaction failed: %v", err)
+		}
+
+		if executionCount != 10 {
+			t.Errorf("expected 10 callbacks executed, got %d", executionCount)
+		}
+	})
+
+	t.Run("OnSuccess callback execution order preservation", func(t *testing.T) {
+		var executionOrder []int
+		var mu sync.Mutex
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Register callbacks in specific order
+			for i := 1; i <= 5; i++ {
+				id := i
+				OnSuccess(txCtx, func() {
+					mu.Lock()
+					executionOrder = append(executionOrder, id)
+					mu.Unlock()
+				})
+			}
+
+			model := TestModel{Name: "order-preservation-test"}
+			return Current(txCtx).Create(&model).Error
+		}()
+
+		if err != nil {
+			t.Fatalf("transaction failed: %v", err)
+		}
+
+		expectedOrder := []int{1, 2, 3, 4, 5}
+		if len(executionOrder) != len(expectedOrder) {
+			t.Errorf("expected %d callbacks, got %d", len(expectedOrder), len(executionOrder))
+		}
+
+		for i, expected := range expectedOrder {
+			if i >= len(executionOrder) || executionOrder[i] != expected {
+				t.Errorf("expected callback order %v, got %v", expectedOrder, executionOrder)
+				break
+			}
+		}
+	})
+
+	t.Run("OnSuccess with invalid context value", func(t *testing.T) {
+		var callbackExecuted bool
+		
+		// Create context with invalid STX value
+		invalidCtx := context.WithValue(context.Background(), txContextKey, "invalid")
+		
+		OnSuccess(invalidCtx, func() {
+			callbackExecuted = true
+		})
+
+		if !callbackExecuted {
+			t.Error("expected callback to execute immediately with invalid context value")
+		}
+	})
+
+	t.Run("OnSuccess callbacks with database operations", func(t *testing.T) {
+		var initialCount int64
+		db.Model(&TestModel{}).Count(&initialCount)
+
+		var callbackExecuted bool
+		var callbackDbValue *TestModel
+		
+		err := func() (err error) {
+			txCtx, cleanup := WithDefer(ctx)
+			defer cleanup(&err)
+
+			// Create test model
+			model := TestModel{Name: "callback-db-test"}
+			if err := Current(txCtx).Create(&model).Error; err != nil {
+				return err
+			}
+
+			// Register callback that reads from database
+			OnSuccess(txCtx, func() {
+				callbackExecuted = true
+				// Read the committed data
+				var foundModel TestModel
+				if err := db.Where("name = ?", "callback-db-test").First(&foundModel).Error; err == nil {
+					callbackDbValue = &foundModel
+				}
+			})
+
+			return nil
+		}()
+
+		if err != nil {
+			t.Fatalf("transaction failed: %v", err)
+		}
+
+		if !callbackExecuted {
+			t.Error("expected callback to be executed")
+		}
+
+		if callbackDbValue == nil {
+			t.Error("expected callback to read committed data from database")
+		} else if callbackDbValue.Name != "callback-db-test" {
+			t.Errorf("expected callback to read correct data, got name: %s", callbackDbValue.Name)
+		}
+	})
+
+	t.Run("OnSuccess with nested transactions", func(t *testing.T) {
+		var outerCallbackExecuted bool
+		var innerCallbackExecuted bool
+		
+		err := WithTransaction(ctx, func(outerCtx context.Context) error {
+			// Register callback in outer transaction
+			OnSuccess(outerCtx, func() {
+				outerCallbackExecuted = true
+			})
+
+			// Create model in outer transaction
+			model1 := TestModel{Name: "outer-nested"}
+			if err := Current(outerCtx).Create(&model1).Error; err != nil {
+				return err
+			}
+
+			// Start inner transaction
+			return WithTransaction(outerCtx, func(innerCtx context.Context) error {
+				// Register callback in inner transaction
+				OnSuccess(innerCtx, func() {
+					innerCallbackExecuted = true
+				})
+
+				// Create model in inner transaction
+				model2 := TestModel{Name: "inner-nested"}
+				return Current(innerCtx).Create(&model2).Error
+			})
+		})
+
+		if err != nil {
+			t.Fatalf("nested transaction failed: %v", err)
+		}
+
+		if !outerCallbackExecuted {
+			t.Error("expected outer callback to be executed")
+		}
+
+		if !innerCallbackExecuted {
+			t.Error("expected inner callback to be executed")
+		}
+	})
+
+	t.Run("OnSuccess stress test", func(t *testing.T) {
+		// Use a separate DB for stress testing to avoid lock contention
+		stressDB := setupTestDB(t)
+		stressCtx := New(context.Background(), stressDB)
+		
+		const numTransactions = 50
+		var successCount int
+
+		// Run transactions sequentially to avoid SQLite lock contention
+		for i := 0; i < numTransactions; i++ {
+			err := func() (err error) {
+				txCtx, cleanup := WithDefer(stressCtx)
+				defer cleanup(&err)
+
+				OnSuccess(txCtx, func() {
+					successCount++
+				})
+
+				model := TestModel{Name: fmt.Sprintf("stress-test-%d", i)}
+				return Current(txCtx).Create(&model).Error
+			}()
+
+			if err != nil {
+				t.Errorf("transaction %d failed: %v", i, err)
+			}
+		}
+
+		if successCount != numTransactions {
+			t.Errorf("expected %d successful callbacks, got %d", numTransactions, successCount)
 		}
 	})
 }
