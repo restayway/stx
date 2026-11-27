@@ -1,6 +1,6 @@
 module github.com/restayway/stx
 
-go 1.19
+go 1.27.4
 
 require (
 	gorm.io/driver/sqlite v1.6.0
